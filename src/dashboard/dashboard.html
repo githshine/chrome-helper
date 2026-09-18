@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../lib/common.css" />
+    <link rel="stylesheet" href="dashboard.css" />
+    <title>Word Cloud Dashboard</title>
+  </head>
+  <body>
+    <header>
+      <strong>Word Cloud Analyzer</strong>
+      <span class="spacer"></span>
+      <label>Site
+        <select id="host"></select>
+      </label>
+      <label>Window
+        <select id="window">
+          <option value="30m">Last 30 minutes</option>
+          <option value="1h">Last hour</option>
+          <option value="3h">Last 3 hours</option>
+          <option value="6h">Last 6 hours</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="3d">Last 3 days</option>
+          <option value="7d">Last 7 days</option>
+        </select>
+      </label>
+      <label>Compare with
+        <select id="compare">
+          <option value="previous">Previous equal period</option>
+          <option value="7d">Last 7 days</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="30m">Last 30 minutes</option>
+          <option value="none">Nothing</option>
+        </select>
+      </label>
+      <label>Language
+        <select id="lang">
+          <option value="all">All</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <button id="reload" class="primary">Refresh</button>
+    </header>
+
+    <section class="summary panel" id="summary"></section>
+
+    <main>
+      <section class="panel cloud-panel">
+        <div class="row">
+          <h3 id="cloudTitle">Word cloud</h3>
+          <span class="spacer"></span>
+          <label>Weight
+            <select id="weightBy">
+              <option value="docFreq">Posts containing word</option>
+              <option value="count">Total occurrences</option>
+            </select>
+          </label>
+          <label>Min count <input type="number" id="minCount" min="1" step="1" style="width: 56px" /></label>
+          <label>Words <input type="number" id="maxTerms" min="20" max="400" step="10" style="width: 64px" /></label>
+          <button id="exportCsv">Export CSV</button>
+        </div>
+        <canvas id="cloud"></canvas>
+        <div id="cloudEmpty" class="empty muted" hidden>
+          No content captured for this window yet. Open a site, click the extension icon and press
+          <strong>Start capturing</strong>.
+        </div>
+      </section>
+
+      <aside class="panel">
+        <div class="tabs">
+          <button class="tab active" data-tab="top">Top words</button>
+          <button class="tab" data-tab="trend">Trending</button>
+          <button class="tab" data-tab="docs">Posts</button>
+        </div>
+        <div class="tab-body" id="tab-top"></div>
+        <div class="tab-body" id="tab-trend" hidden></div>
+        <div class="tab-body" id="tab-docs" hidden></div>
+      </aside>
+    </main>
+
+    <section class="panel compare-panel" id="comparePanel">
+      <div class="row">
+        <h3 id="compareTitle">Comparison cloud</h3>
+        <span class="spacer"></span>
+        <span id="compareMeta" class="muted"></span>
+      </div>
+      <canvas id="compareCloud"></canvas>
+    </section>
+
+    <div id="detail" class="detail panel" hidden>
+      <div class="row">
+        <strong id="detailTerm"></strong>
+        <span class="spacer"></span>
+        <button id="detailClose">Close</button>
+      </div>
+      <div id="detailBody"></div>
+    </div>
+
+    <script type="module" src="dashboard.js"></script>
+  </body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Word Cloud Analyzer · test harness</title>
+    <style>
+      body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 20px; }
+      #summary { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+      .pass { color: #1a7f37; }
+      .fail { color: #cf222e; }
+      li { margin-bottom: 2px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+      canvas { width: 900px; height: 420px; border: 1px solid #d0d7de; border-radius: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="summary">running…</div>
+    <ul id="results"></ul>
+    <h3>Word cloud rendering</h3>
+    <canvas id="cloud"></canvas>
+    <div id="cloudInfo"></div>
+
+    <script type="module">
+      const { cases } = await import(`./cases.mjs?v=${Date.now()}`);
+      import { analyze } from '../src/lib/tokenize.js';
+      import { renderWordCloud, hitTest } from '../src/lib/wordcloud.js';
+      import { addDocs, getDocsInRange, pruneOlderThan, listHosts, getStats, clearAll, setMeta, getMeta } from '../src/lib/db.js';
+
+      const results = document.getElementById('results');
+      let passed = 0;
+      let failed = 0;
+
+      const t = {
+        ok(value, message) {
+          if (!value) throw new Error(message || 'expected truthy value');
+        },
+        equal(actual, expected, message) {
+          if (actual !== expected) throw new Error(message || `expected ${expected}, got ${actual}`);
+        },
+        deepEqual(actual, expected, message) {
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new Error(message || `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+          }
+        }
+      };
+
+      function record(name, error) {
+        const li = document.createElement('li');
+        if (error) {
+          failed += 1;
+          li.className = 'fail';
+          li.textContent = `FAIL  ${name} — ${error.message}`;
+        } else {
+          passed += 1;
+          li.className = 'pass';
+          li.textContent = `PASS  ${name}`;
+        }
+        results.appendChild(li);
+      }
+
+      async function runCase(name, fn) {
+        try {
+          await fn(t);
+          record(name, null);
+        } catch (err) {
+          record(name, err);
+        }
+      }
+
+      async function run() {
+        for (const testCase of cases) await runCase(testCase.name, testCase.run);
+
+        // Storage layer (needs IndexedDB, so it only runs in the browser).
+        await clearAll();
+        const now = Date.now();
+        await runCase('db de-duplicates repeated captures per host', async (a) => {
+          const first = await addDocs([
+            { hash: 'h1', text: 'hello world', ts: now, host: 'x.com', url: 'u', lang: 'en' },
+            { hash: 'h2', text: '你好世界', ts: now, host: 'x.com', url: 'u', lang: 'zh' }
+          ]);
+          a.equal(first.added, 2);
+          const second = await addDocs([
+            { hash: 'h1', text: 'hello world', ts: now + 10, host: 'x.com', url: 'u', lang: 'en' },
+            { hash: 'h3', text: 'brand new post', ts: now + 10, host: 'x.com', url: 'u', lang: 'en' }
+          ]);
+          a.equal(second.added, 1, 'only the new block is stored');
+          a.equal(second.duplicates, 1, 'the repeat is reported as duplicate');
+        });
+
+        await runCase('db keeps identical text from different hosts apart', async (a) => {
+          const res = await addDocs([
+            { hash: 'h1', text: 'hello world', ts: now, host: 'other.com', url: 'u', lang: 'en' }
+          ]);
+          a.equal(res.added, 1);
+        });
+
+        await runCase('db duplicates inside one batch are collapsed', async (a) => {
+          const res = await addDocs([
+            { hash: 'dup', text: 'same', ts: now, host: 'x.com', url: 'u', lang: 'en' },
+            { hash: 'dup', text: 'same', ts: now, host: 'x.com', url: 'u', lang: 'en' }
+          ]);
+          a.equal(res.added, 1);
+          a.equal(res.duplicates, 1);
+        });
+
+        await runCase('db queries by time window and host', async (a) => {
+          await addDocs([
+            { hash: 'old', text: 'ancient history', ts: now - 8 * 86400000, host: 'x.com', url: 'u', lang: 'en' }
+          ]);
+          const recent = await getDocsInRange(now - 1800000, now + 60000);
+          a.ok(recent.every((d) => d.ts >= now - 1800000), 'only window rows');
+          a.ok(!recent.some((d) => d.text === 'ancient history'), 'older row excluded');
+          const scoped = await getDocsInRange(0, now + 60000, { host: 'other.com' });
+          a.equal(scoped.length, 1);
+          a.equal(scoped[0].host, 'other.com');
+        });
+
+        await runCase('db prunes beyond the retention window', async (a) => {
+          const before = await getStats();
+          const removed = await pruneOlderThan(now - 7 * 86400000);
+          a.equal(removed, 1, 'the 8-day-old row is removed');
+          const after = await getStats();
+          a.equal(after.total, before.total - 1);
+          const hosts = await listHosts();
+          a.ok(hosts.some((h) => h.host === 'x.com'));
+        });
+
+        await runCase('clearAll also wipes bookkeeping such as announced words', async (a) => {
+          await setMeta('announcedLongWords', { internationalization: Date.now() });
+          a.ok(await getMeta('announcedLongWords'), 'meta should be readable before clearing');
+          await clearAll();
+          a.equal(await getMeta('announcedLongWords'), null, 'meta must be gone after clearAll');
+        });
+
+        await clearAll();
+
+        await runCase('word cloud places words without overlapping', (a) => {
+          const corpus = [
+            '人工智能 监管 新规 出台 市场 反应 强烈',
+            'artificial intelligence regulation shakes the market today',
+            'OpenAI 发布新模型 开发者 讨论 热烈 artificial intelligence',
+            '市场 行情 走高 科技股 领涨 investors watch closely',
+            'rocket launch success 火箭发射成功 太空 探索'
+          ].flatMap((text) => Array.from({ length: 6 }, () => ({ text })));
+          const analysis = analyze(corpus, { minCount: 1 });
+          const placed = renderWordCloud(document.getElementById('cloud'), analysis.terms);
+          a.ok(placed.length > 5, `expected several placed words, got ${placed.length}`);
+          for (let i = 0; i < placed.length; i += 1) {
+            for (let j = i + 1; j < placed.length; j += 1) {
+              const p = placed[i];
+              const q = placed[j];
+              const overlap = !(p.x + p.w < q.x || q.x + q.w < p.x || p.y + p.h < q.y || q.y + q.h < p.y);
+              a.ok(!overlap, `"${p.term.text}" overlaps "${q.term.text}"`);
+            }
+          }
+          const hit = hitTest(placed, placed[0].x + 1, placed[0].y + 1);
+          a.ok(hit && hit.term.text === placed[0].term.text, 'hit testing works');
+          document.getElementById('cloudInfo').textContent = `${placed.length} words placed`;
+        });
+
+        const summary = document.getElementById('summary');
+        summary.textContent = `${failed === 0 ? 'ALL PASS' : 'FAILURES'} — ${passed} passed, ${failed} failed`;
+        summary.className = failed === 0 ? 'pass' : 'fail';
+      }
+
+      run();
+    </script>
+  </body>
+</html>

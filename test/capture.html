@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Capture engine harness</title>
+    <style>
+      body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0; }
+      #report { position: fixed; top: 0; left: 0; right: 0; background: #fff; border-bottom: 2px solid #d0d7de;
+        padding: 10px 16px; z-index: 5; }
+      #summary { font-size: 18px; font-weight: 700; }
+      .pass { color: #1a7f37; }
+      .fail { color: #cf222e; }
+      li { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+      #feed { margin: 120px 16px 40px; max-width: 760px; }
+      .item { border-bottom: 1px solid #eaeef2; padding: 14px 0; min-height: 90px; }
+    </style>
+  </head>
+  <body>
+    <header id="report">
+      <div id="summary">running…</div>
+      <ul id="results"></ul>
+    </header>
+    <div id="feed"></div>
+
+    <script>
+      // ---------------------------------------------------------------- mock feed
+      const feed = document.getElementById('feed');
+      const PAGE_SIZE = 20;
+      const MAX_PAGES = 5;
+      let loadedPages = 0;
+      let loading = false;
+
+      function itemText(n) {
+        const flavours = [
+          `Post ${n}: artificial intelligence regulation debate continues in the market today`,
+          `贴文 ${n}：人工智能监管新规出台，市场行情反应强烈`,
+          `Post ${n}: rocket launch success brings investors back to technology stocks`,
+          `贴文 ${n}：火箭发射成功，科技股领涨，开发者社区讨论热烈`
+        ];
+        return flavours[n % flavours.length];
+      }
+
+      function renderItems(numbers) {
+        for (const n of numbers) {
+          const div = document.createElement('div');
+          div.className = 'item';
+          const p = document.createElement('p');
+          p.textContent = itemText(n);
+          div.appendChild(p);
+          feed.appendChild(div);
+        }
+      }
+
+      function loadNextPage() {
+        if (loading || loadedPages >= MAX_PAGES) return;
+        loading = true;
+        setTimeout(() => {
+          const start = loadedPages * PAGE_SIZE;
+          renderItems(Array.from({ length: PAGE_SIZE }, (_, i) => start + i));
+          loadedPages += 1;
+          loading = false;
+        }, 200);
+      }
+
+      // Poll instead of listening for 'scroll': scroll events are rAF-driven and can be
+      // throttled in an automated/occluded window, which would make the mock feed look dead.
+      setInterval(() => {
+        if (window.scrollY + window.innerHeight > document.body.scrollHeight - 800) loadNextPage();
+      }, 100);
+      loadNextPage();
+
+      // -------------------------------------------------------------- chrome stub
+      const store = new Map(); // "host|hash" -> text, mimics the extension database
+      const listeners = [];
+      const cycleDone = { resolve: null };
+      let lastStats = null;
+
+      async function handleMessage(msg) {
+        if (msg.type === 'CONTENT_READY') return { active: false };
+        if (msg.type === 'CAPTURE') {
+          let added = 0;
+          let duplicates = 0;
+          for (const item of msg.items) {
+            const key = `${msg.host}|${item.hash}`;
+            if (store.has(key)) duplicates += 1;
+            else {
+              store.set(key, item.text);
+              added += 1;
+            }
+          }
+          return { added, duplicates };
+        }
+        if (msg.type === 'PROGRESS') return { ok: true };
+        if (msg.type === 'CYCLE_DONE') {
+          lastStats = msg.stats;
+          if (cycleDone.resolve) cycleDone.resolve(msg.stats);
+          return { ok: true };
+        }
+        return { ok: false };
+      }
+
+      window.chrome = {
+        runtime: {
+          id: 'harness',
+          sendMessage: (msg) => handleMessage(msg),
+          onMessage: { addListener: (fn) => listeners.push(fn) }
+        }
+      };
+
+      const SETTINGS = {
+        maxScrolls: 60,
+        scrollDelayMs: 60,
+        idleRoundsToStop: 2,
+        duplicateStopRatio: 0.9,
+        cycleTimeoutMs: 300000,
+        minTextLength: 12,
+        maxTextLength: 2000
+      };
+
+      function runCycle() {
+        return new Promise((resolve) => {
+          cycleDone.resolve = resolve;
+          sendToContent({ type: 'START_CYCLE', settings: SETTINGS });
+        });
+      }
+
+      function sendToContent(msg) {
+        listeners.forEach((fn) => fn(msg, {}, () => {}));
+      }
+
+      // ------------------------------------------------------------------ asserts
+      let passed = 0;
+      let failed = 0;
+      function check(name, condition, detail) {
+        const li = document.createElement('li');
+        if (condition) {
+          passed += 1;
+          li.className = 'pass';
+          li.textContent = `PASS  ${name}`;
+        } else {
+          failed += 1;
+          li.className = 'fail';
+          li.textContent = `FAIL  ${name} — ${detail || ''}`;
+        }
+        document.getElementById('results').appendChild(li);
+      }
+
+      window.__harness = { runCycle, sendToContent, store, check, SETTINGS, renderItems, feed, get lastStats() { return lastStats; },
+        finish() {
+          const summary = document.getElementById('summary');
+          summary.textContent = `${failed === 0 ? 'ALL PASS' : 'FAILURES'} — ${passed} passed, ${failed} failed`;
+          summary.className = failed === 0 ? 'pass' : 'fail';
+        },
+        get totalItems() { return document.querySelectorAll('#feed .item').length; }
+      };
+    </script>
+
+    <!-- the real content script, unmodified (cache-busted so edits are picked up) -->
+    <script>
+      document.write(`<script src="../src/content/content.js?v=${Date.now()}"><\/script>`);
+    </script>
+
+    <script>
+      (async () => {
+        const h = window.__harness;
+
+        // 1) First capture pass: scroll through the whole infinite feed.
+        const first = await h.runCycle();
+        const rendered = h.totalItems;
+        h.check('auto-scroll pulled in every lazily loaded post', h.store.size === rendered,
+          `captured ${h.store.size} of ${rendered}`);
+        h.check('auto-scroll loaded more than the first page', rendered > 20, `only ${rendered} items rendered`);
+        h.check('cycle stops on its own before the scroll limit',
+          first.rounds < h.SETTINGS.maxScrolls && ['end-of-page', 'no-new-content', 'reached-known-content'].includes(first.stopReason),
+          `rounds=${first.rounds} reason=${first.stopReason}`);
+        h.check('no duplicate blocks were stored', h.store.size === rendered, `store=${h.store.size}`);
+
+        const afterFirst = h.store.size;
+
+        // 2) Simulate a page refresh: the timeline shows 10 brand-new posts on top
+        //    followed by content we have already captured.
+        h.feed.innerHTML = '';
+        window.scrollTo(0, 0);
+        h.renderItems(Array.from({ length: 10 }, (_, i) => 1000 + i));
+        h.renderItems(Array.from({ length: 30 }, (_, i) => i));
+        await new Promise((r) => setTimeout(r, 300));
+
+        const second = await h.runCycle();
+        h.check('after refresh only the new posts are stored', h.store.size === afterFirst + 10,
+          `expected ${afterFirst + 10}, got ${h.store.size}`);
+        h.check('repeat content is detected and reported', second.duplicates > 0,
+          `duplicates=${second.duplicates}`);
+        h.check('cycle stops quickly once known content is reached', second.rounds <= 8,
+          `rounds=${second.rounds} reason=${second.stopReason}`);
+
+        // 3) Stop request must interrupt a running cycle.
+        h.feed.innerHTML = '';
+        h.renderItems(Array.from({ length: 300 }, (_, i) => 5000 + i));
+        window.scrollTo(0, 0);
+        const running = h.runCycle();
+        setTimeout(() => h.sendToContent({ type: 'STOP_CYCLE' }), 250);
+        const third = await running;
+        h.check('stop request ends the cycle', third.stopReason === 'stopped', `reason=${third.stopReason}`);
+
+        h.finish();
+      })();
+    </script>
+  </body>
+</html>

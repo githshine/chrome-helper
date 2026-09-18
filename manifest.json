@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Word Cloud Analyzer (EN/中文)",
+  "version": "1.0.0",
+  "description": "Auto-scrolls and refreshes pages, captures new content over time, and builds bilingual (English/Chinese) word clouds for 30 minutes up to 7 days.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "alarms",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Word Cloud Analyzer",
+    "default_popup": "src/popup/popup.html"
+  },
+  "options_page": "src/options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/dashboard/dashboard.html"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

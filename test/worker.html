@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Service worker harness</title>
+    <style>
+      body { font-family: "Segoe UI", sans-serif; margin: 20px; }
+      #summary { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+      .pass { color: #1a7f37; }
+      .fail { color: #cf222e; }
+      li { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <div id="summary">running…</div>
+    <ul id="results"></ul>
+
+    <script>
+      // ------------------------------------------------- minimal chrome API stub
+      const calls = { reload: [], badge: [], tabMessages: [], injected: [], offscreen: [], alerts: [] };
+      const alarms = new Map();
+      const listeners = { message: [], alarm: [], installed: [], startup: [], tabRemoved: [] };
+      const localStore = {};
+      const sessionStore = {};
+
+      const tabs = {
+        1: { id: 1, url: 'https://x.com/home', title: 'Home / X' }
+      };
+
+      function area(backing) {
+        return {
+          get: async (key) => (key == null ? { ...backing } : { [key]: backing[key] }),
+          set: async (obj) => Object.assign(backing, obj),
+          remove: async (key) => delete backing[key]
+        };
+      }
+
+      window.chrome = {
+        runtime: {
+          id: 'harness',
+          getURL: (p) => `chrome-extension://harness/${p}`,
+          sendMessage: async (msg) => {
+            if (msg?.target === 'offscreen') calls.alerts.push(msg);
+            return { ok: true };
+          },
+          onMessage: { addListener: (fn) => listeners.message.push(fn) },
+          onInstalled: { addListener: (fn) => listeners.installed.push(fn) },
+          onStartup: { addListener: (fn) => listeners.startup.push(fn) }
+        },
+        storage: { local: area(localStore), session: area(sessionStore) },
+        alarms: {
+          create: async (name, info) => alarms.set(name, info),
+          clear: async (name) => alarms.delete(name),
+          get: async (name) => alarms.get(name) || null,
+          onAlarm: { addListener: (fn) => listeners.alarm.push(fn) }
+        },
+        tabs: {
+          get: async (id) => {
+            if (!tabs[id]) throw new Error('No tab with id ' + id);
+            return tabs[id];
+          },
+          reload: async (id, opts) => calls.reload.push({ id, opts }),
+          sendMessage: async (id, msg) => {
+            calls.tabMessages.push({ id, msg });
+            if (msg.type === 'PING') return { ok: true, running: false };
+            return { ok: true };
+          },
+          onRemoved: { addListener: (fn) => listeners.tabRemoved.push(fn) }
+        },
+        action: {
+          setBadgeText: async (o) => calls.badge.push(o.text),
+          setBadgeBackgroundColor: async () => {}
+        },
+        scripting: {
+          executeScript: async (o) => calls.injected.push(o)
+        },
+        offscreen: {
+          hasDocument: async () => calls.offscreen.length > 0,
+          createDocument: async (o) => calls.offscreen.push(o)
+        }
+      };
+
+      window.__stub = { calls, alarms, listeners, sessionStore, localStore, tabs };
+    </script>
+
+    <script type="module">
+      import { clearAll, getStats, getDocsInRange } from '../src/lib/db.js';
+      import '../src/background.js';
+
+      const { calls, alarms, listeners, tabs } = window.__stub;
+      const results = document.getElementById('results');
+      let passed = 0;
+      let failed = 0;
+
+      function check(name, condition, detail) {
+        const li = document.createElement('li');
+        if (condition) {
+          passed += 1;
+          li.className = 'pass';
+          li.textContent = `PASS  ${name}`;
+        } else {
+          failed += 1;
+          li.className = 'fail';
+          li.textContent = `FAIL  ${name} — ${detail ?? ''}`;
+        }
+        results.appendChild(li);
+      }
+
+      /** Deliver a message exactly like the extension runtime does. */
+      function message(msg, sender = {}) {
+        return new Promise((resolve) => {
+          listeners.message[0](msg, sender, resolve);
+        });
+      }
+
+      const DAY = 86400000;
+
+      async function run() {
+        await clearAll();
+
+        check('service worker registered its listeners',
+          listeners.message.length === 1 && listeners.alarm.length === 1 && listeners.tabRemoved.length === 1,
+          `message=${listeners.message.length} alarm=${listeners.alarm.length}`);
+
+        const status = await message({ type: 'GET_STATUS' });
+        check('GET_STATUS returns defaults', status.settings.retentionDays === 7 && status.settings.autoRefresh === true,
+          JSON.stringify(status.settings).slice(0, 120));
+
+        const started = await message({ type: 'START_SESSION', tabId: 1 });
+        check('START_SESSION succeeds on a normal tab', started.ok === true, JSON.stringify(started));
+        check('content script is pinged and told to start',
+          calls.tabMessages.some((c) => c.msg.type === 'START_CYCLE'),
+          JSON.stringify(calls.tabMessages));
+        check('badge shows the active session count', calls.badge.at(-1) === '1', calls.badge.at(-1));
+
+        const afterStart = await message({ type: 'GET_STATUS', tabId: 1 });
+        check('session is tracked with the tab host', afterStart.session?.host === 'x.com',
+          JSON.stringify(afterStart.session));
+
+        const ready = await message({ type: 'CONTENT_READY', url: tabs[1].url, host: 'x.com' }, { tab: tabs[1] });
+        check('content script is told the session is active', ready.active === true && !!ready.settings,
+          JSON.stringify(ready));
+
+        const now = Date.now();
+        const capture = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now,
+            items: [
+              { hash: 'a1', text: '人工智能监管新规出台，市场反应强烈' },
+              { hash: 'b2', text: 'Rocket launch success lifts technology stocks' }
+            ]
+          },
+          { tab: tabs[1] }
+        );
+        check('captured blocks are stored once', capture.added === 2 && capture.duplicates === 0, JSON.stringify(capture));
+
+        const recapture = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now + 5000,
+            items: [
+              { hash: 'a1', text: '人工智能监管新规出台，市场反应强烈' },
+              { hash: 'c3', text: 'Brand new post that nobody has seen before' }
+            ]
+          },
+          { tab: tabs[1] }
+        );
+        check('re-seen blocks are reported as duplicates', recapture.added === 1 && recapture.duplicates === 1,
+          JSON.stringify(recapture));
+
+        const counted = await message({ type: 'GET_STATUS', tabId: 1 });
+        check('session counters accumulate', counted.session.added === 3 && counted.session.duplicates === 1,
+          JSON.stringify(counted.session));
+
+        const storedDocs = await getDocsInRange(now - 60000, now + 60000);
+        check('language is detected while storing',
+          storedDocs.some((d) => d.lang === 'zh') && storedDocs.some((d) => d.lang === 'en'),
+          JSON.stringify(storedDocs.map((d) => d.lang)));
+
+        await message({ type: 'CYCLE_DONE', stats: { rounds: 4, added: 3, duplicates: 1, stopReason: 'end-of-page' } },
+          { tab: tabs[1] });        const scheduled = alarms.get('wca:refresh:1');
+        check('a refresh alarm is scheduled after a cycle',
+          scheduled && scheduled.delayInMinutes === 5, JSON.stringify(scheduled));
+        const waiting = await message({ type: 'GET_STATUS', tabId: 1 });
+        check('session reports the next refresh time',
+          waiting.session.status === 'waiting' && waiting.session.nextRefreshAt > Date.now(),
+          JSON.stringify(waiting.session));
+        check('cycle counter increments', waiting.session.cycles === 1, String(waiting.session.cycles));
+
+        await listeners.alarm[0]({ name: 'wca:refresh:1' });
+        check('the refresh alarm reloads the tab', calls.reload.at(-1)?.id === 1, JSON.stringify(calls.reload));
+
+        // Long-word alert: silent until it is switched on, then it rings once.
+        const quiet = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now + 6000,
+            items: [{ hash: 'lw0', text: 'Silent institutionalization of the rules today' }]
+          },
+          { tab: tabs[1] }
+        );
+        check('no alert while the long-word alarm is switched off',
+          calls.alerts.length === 0 && quiet.longWords.length === 0, JSON.stringify(calls.alerts));
+
+        localStore.settings = { ...(localStore.settings || {}), alertOnLongWord: true, longWordChars: 15, minCount: 1 };
+        await message({ type: 'SETTINGS_CHANGED' });
+
+        const loud = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now + 7000,
+            items: [{ hash: 'lw1', text: 'Watch the internationalization rollout closely' }]
+          },
+          { tab: tabs[1] }
+        );
+        check('a long single word triggers the alert',
+          loud.longWords.some((w) => w.text === 'internationalization') && calls.alerts.length === 1,
+          `${JSON.stringify(loud.longWords)} alerts=${calls.alerts.length}`);
+        check('the chime is played through an offscreen document',
+          calls.offscreen.length === 1 && calls.offscreen[0].reasons.includes('AUDIO_PLAYBACK') &&
+          calls.alerts[0].sound === 'chime' && calls.alerts[0].volume === 0.3,
+          `${JSON.stringify(calls.offscreen)} ${JSON.stringify(calls.alerts)}`);
+
+        const repeat = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now + 8000,
+            items: [{ hash: 'lw2', text: 'Again the internationalization rollout continues' }]
+          },
+          { tab: tabs[1] }
+        );
+        check('the same long word does not ring twice',
+          repeat.longWords.length === 0 && calls.alerts.length === 1,
+          `${JSON.stringify(repeat.longWords)} alerts=${calls.alerts.length}`);
+
+        const shortOnly = await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now + 9000,
+            items: [{ hash: 'lw3', text: 'Ordinary short words stay quiet here' }]
+          },
+          { tab: tabs[1] }
+        );
+        check('ordinary words never ring', shortOnly.longWords.length === 0 && calls.alerts.length === 1,
+          JSON.stringify(shortOnly.longWords));
+
+        const previewed = await message({ type: 'TEST_ALERT', sound: 'bell', volume: 0.8 });
+        check('the options page can preview any sound',
+          previewed.ok === true && calls.alerts.length === 2 &&
+          calls.alerts[1].sound === 'bell' && calls.alerts[1].volume === 0.8,
+          `${JSON.stringify(previewed)} ${JSON.stringify(calls.alerts.at(-1))}`);
+
+        check('only one offscreen document is ever created', calls.offscreen.length === 1,
+          JSON.stringify(calls.offscreen));
+
+        localStore.settings = { ...localStore.settings, alertOnLongWord: false };
+        await message({ type: 'SETTINGS_CHANGED' });
+
+        // Retention: store an old block, then let the prune alarm run.
+        await message(
+          {
+            type: 'CAPTURE',
+            host: 'x.com',
+            url: tabs[1].url,
+            ts: now - 8 * DAY,
+            items: [{ hash: 'old1', text: 'Ancient content that must be pruned away' }]
+          },
+          { tab: tabs[1] }
+        );
+        const beforePrune = await getStats();
+        await listeners.alarm[0]({ name: 'wca:prune' });
+        const afterPrune = await getStats();
+        check('prune alarm drops content older than the retention window',
+          afterPrune.total === beforePrune.total - 1, `${beforePrune.total} -> ${afterPrune.total}`);
+
+        await message({ type: 'STOP_SESSION', tabId: 1 });
+        const stopped = await message({ type: 'GET_STATUS', tabId: 1 });
+        check('STOP_SESSION clears session, alarm and badge',
+          stopped.session === null && !alarms.has('wca:refresh:1') && calls.badge.at(-1) === '',
+          `session=${JSON.stringify(stopped.session)} badge=${calls.badge.at(-1)}`);
+
+        // A tab that no longer exists must not keep a session alive.
+        await message({ type: 'START_SESSION', tabId: 1 });
+        await message({ type: 'CYCLE_DONE', stats: { rounds: 1, stopReason: 'end-of-page' } }, { tab: tabs[1] });
+        delete tabs[1];
+        await listeners.alarm[0]({ name: 'wca:refresh:1' });
+        const orphan = await message({ type: 'GET_STATUS', tabId: 1 });
+        check('sessions for closed tabs are cleaned up', orphan.session === null, JSON.stringify(orphan.session));
+
+        const unknown = await message({ type: 'NOT_A_REAL_MESSAGE' });
+        check('unknown messages are answered safely', unknown.ok === false, JSON.stringify(unknown));
+
+        await clearAll();
+        const summary = document.getElementById('summary');
+        summary.textContent = `${failed === 0 ? 'ALL PASS' : 'FAILURES'} — ${passed} passed, ${failed} failed`;
+        summary.className = failed === 0 ? 'pass' : 'fail';
+      }
+
+      run().catch((err) => {
+        check('harness completed without throwing', false, err?.stack || String(err));
+        document.getElementById('summary').textContent = `ERROR — ${err?.message || err}`;
+        document.getElementById('summary').className = 'fail';
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Seed sample data</title>
+    <style>
+      body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; }
+    </style>
+  </head>
+  <body>
+    <h3 id="status">seeding…</h3>
+    <script type="module">
+      import { addDocs, clearAll, getStats } from '../src/lib/db.js';
+
+      const MIN = 60000;
+      const HOUR = 60 * MIN;
+      const DAY = 24 * HOUR;
+
+      // Topics that dominate the last 30 minutes.
+      const hot = [
+        '突发：人工智能监管新规今天出台，市场行情剧烈波动',
+        'Breaking: artificial intelligence regulation lands today, markets swing hard',
+        '人工智能监管新规引发科技股抛售，投资者观望',
+        'Investors dump technology stocks after the artificial intelligence regulation news',
+        '分析师认为人工智能监管新规影响有限，长期利好',
+        'Analysts say the artificial intelligence regulation is manageable for big platforms',
+        '#AI 监管 来了，创业公司压力最大',
+        'Startups carry the heaviest burden under the new rules #ai'
+      ];
+
+      // Background chatter spread across the week.
+      const background = [
+        '火箭发射成功，全场观众欢呼，太空探索再进一步',
+        'Rocket launch success puts space exploration back in the headlines',
+        '今天的市场行情继续走高，科技股领涨',
+        'The market keeps climbing as technology stocks lead the way',
+        'OpenAI 发布新模型，开发者社区讨论热烈',
+        'OpenAI ships a new model and the developer community reacts',
+        '新能源汽车销量创新高，产业链受益',
+        'Electric vehicle sales hit a record and the supply chain benefits',
+        '世界杯预选赛结果出炉，球迷彻夜狂欢',
+        'World cup qualifier results spark celebrations overnight',
+        '通货膨胀数据低于预期，央行政策或将转向',
+        'Inflation data comes in below expectations and rate cuts are back on the table'
+      ];
+
+      function hash(text, salt) {
+        let h = 0x811c9dc5;
+        const s = `${text}|${salt}`;
+        for (let i = 0; i < s.length; i += 1) {
+          h ^= s.charCodeAt(i);
+          h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        return h.toString(16);
+      }
+
+      async function seed() {
+        await clearAll();
+        const now = Date.now();
+        const docs = [];
+
+        for (let i = 0; i < 90; i += 1) {
+          const text = `${background[i % background.length]}（${i}）`;
+          const ts = now - Math.floor(Math.random() * 7 * DAY);
+          docs.push({ hash: hash(text, i), text, ts, host: 'x.com', url: 'https://x.com/home', lang: '' });
+        }
+        for (let i = 0; i < 60; i += 1) {
+          const text = `${hot[i % hot.length]}（${i}）`;
+          const ts = now - Math.floor(Math.random() * 28 * MIN);
+          docs.push({ hash: hash(text, `hot${i}`), text, ts, host: 'x.com', url: 'https://x.com/home', lang: '' });
+        }
+        for (let i = 0; i < 40; i += 1) {
+          const text = `${background[(i + 3) % background.length]} — weibo ${i}`;
+          const ts = now - Math.floor(Math.random() * 2 * DAY);
+          docs.push({ hash: hash(text, `wb${i}`), text, ts, host: 'weibo.com', url: 'https://weibo.com/', lang: '' });
+        }
+
+        const { detectLang } = await import('../src/lib/tokenize.js');
+        for (const d of docs) d.lang = detectLang(d.text);
+
+        const result = await addDocs(docs);
+        const stats = await getStats();
+        document.getElementById('status').textContent =
+          `seeded ${result.added} blocks (total ${stats.total}), oldest ${new Date(stats.oldest).toLocaleString()}`;
+      }
+
+      seed();
+    </script>
+  </body>
+</html>
